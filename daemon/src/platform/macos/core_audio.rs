@@ -388,13 +388,13 @@ pub fn find_all_existing_aggregates() -> Result<Vec<AudioDeviceID>> {
 
 /*
     This function finds GoXLR devices by first verifying their VID/PID via IOKit
-    IOUSBHostDevice entries, then matching those verified names against CoreAudio
-    HAL audio devices. If found, returns the device's UID and it's display name
-    according to MacOS.
+    IOUSBHostDevice entries, then matching those verified location IDs against
+    CoreAudio HAL audio devices. If found, returns the device's UID and its
+    display name according to MacOS.
 */
 pub fn get_goxlr_devices() -> Result<Vec<CoreAudioDevice>> {
-    // First, find GoXLR USB device names via IOKit VID/PID matching..
-    let mut usb_names = Vec::new();
+    // First, find GoXLR USB location IDs via IOKit VID/PID matching..
+    let mut usb_location_ids: Vec<String> = Vec::new();
 
     let mut iterator = mem::MaybeUninit::<io_iterator_t>::uninit();
     let matcher = unsafe { IOServiceMatching(c"IOUSBHostDevice".as_ptr() as *const c_char) };
@@ -408,7 +408,7 @@ pub fn get_goxlr_devices() -> Result<Vec<CoreAudioDevice>> {
 
     let vid = CFString::new("idVendor");
     let pid = CFString::new("idProduct");
-    let name = CFString::new("USB Product Name");
+    let lid = CFString::new("locationID");
 
     loop {
         let service = unsafe { IOIteratorNext(iterator.assume_init()) };
@@ -444,21 +444,22 @@ pub fn get_goxlr_devices() -> Result<Vec<CoreAudioDevice>> {
             let pid = pid.to_i32().unwrap();
             // Check whether we're a GoXLR
             if pid == PID_GOXLR_FULL as i32 || pid == PID_GOXLR_MINI as i32 {
-                // Get the USB product name of this device..
-                if let Some(name) = properties.find(&name) {
-                    if let Some(name) = name.downcast::<CFString>() {
-                        usb_names.push(name.to_string());
+                // Get the locationID for this device..
+                if let Some(loc) = properties.find(&lid) {
+                    if let Some(loc) = loc.downcast::<CFNumber>() {
+                        let loc_id = format!("{:x}", loc.to_i64().unwrap());
+                        usb_location_ids.push(loc_id);
                     }
                 }
             }
         }
     }
 
-    if usb_names.is_empty() {
+    if usb_location_ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Now match verified USB device names against CoreAudio HAL audio devices..
+    // Now match verified USB location IDs against CoreAudio HAL audio devices..
     let mut devices: Vec<CoreAudioDevice> = Vec::new();
 
     let properties = AudioObjectPropertyAddress {
@@ -512,13 +513,17 @@ pub fn get_goxlr_devices() -> Result<Vec<CoreAudioDevice>> {
             continue;
         }
 
-        let name = match get_name_for_id(device_id) {
-            Ok(name) => name,
-            Err(_) => continue,
-        };
-
-        // Only accept devices whose name matches a VID/PID-verified GoXLR USB device
-        if usb_names.iter().any(|usb_name| name.contains(usb_name)) {
+        // Match by checking if the UID's 4th colon-separated segment matches a known locationID
+        // e.g. UID "AppleUSBAudioEngine:TC-Helicon:GoXLR:1120000:1,2" → segment "1120000"
+        let segment = uid.split(':').nth(3);
+        let matches = segment.is_some_and(|s| {
+            usb_location_ids.iter().any(|loc_id| loc_id == s)
+        });
+        if matches {
+            let name = match get_name_for_id(device_id) {
+                Ok(name) => name,
+                Err(_) => continue,
+            };
             devices.push(CoreAudioDevice {
                 display_name: name,
                 uid,
