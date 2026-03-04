@@ -8,7 +8,7 @@ use anyhow::bail;
 use core_foundation::array::{
     CFArrayAppendValue, CFArrayCreateMutable, CFMutableArrayRef, kCFTypeArrayCallBacks,
 };
-use core_foundation::base::{CFType, TCFType, ToVoid, UInt32, kCFAllocatorDefault};
+use core_foundation::base::{TCFType, ToVoid, UInt32, kCFAllocatorDefault};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::{CFString, CFStringRef};

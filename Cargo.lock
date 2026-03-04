@@ -2028,7 +2028,6 @@ dependencies = [
  "image",
  "include_dir",
  "interprocess",
- "io-kit-sys",
  "json-patch",
  "jsonpath-rust",
  "ksni",
@@ -2651,16 +2650,6 @@ dependencies = [
  "tokio",
  "widestring 1.2.1",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "io-kit-sys"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "617ee6cf8e3f66f3b4ea67a4058564628cde41901316e19f559e14c7c72c5e7b"
-dependencies = [
- "core-foundation-sys",
- "mach2",
 ]
 
 [[package]]
