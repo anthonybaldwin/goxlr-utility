@@ -372,7 +372,10 @@ define_class! {
 
     unsafe impl NSObjectProtocol for UtilityDelegate {}
 
-    unsafe impl NSApplicationDelegate for UtilityDelegate {
+    // Required for app.setDelegate() protocol conformance
+    unsafe impl NSApplicationDelegate for UtilityDelegate {}
+
+    impl UtilityDelegate {
         //Showcase function for now
         #[unsafe(method(menu_item:))]
         unsafe fn menu_item(&self, item: &NSMenuItem) {
@@ -381,9 +384,7 @@ define_class! {
                     warn!("Failed to send Tray Signal");
                 }
         }
-    }
 
-    impl UtilityDelegate {
         #[unsafe(method(computerWillShutDownNotification:))]
         unsafe fn computer_will_shutdown(&self, notification: &NSNotification) {
             debug!("Received Shutdown Notification! {:?}", notification);

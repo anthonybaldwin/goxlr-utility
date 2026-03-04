@@ -21,8 +21,9 @@ use coreaudio_sys::{
     kAudioDevicePropertyPreferredChannelsForStereo, kAudioHardwareNoError,
     kAudioHardwarePropertyDevices, kAudioHardwarePropertyPlugInForBundleID,
     kAudioObjectPropertyElementMaster, kAudioObjectPropertyScopeGlobal,
-    kAudioObjectPropertyScopeInput, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
-    kAudioObjectUnknown, kAudioPlugInCreateAggregateDevice, kAudioPlugInDestroyAggregateDevice,
+    kAudioObjectPropertyName, kAudioObjectPropertyScopeInput, kAudioObjectPropertyScopeOutput,
+    kAudioObjectSystemObject, kAudioObjectUnknown, kAudioPlugInCreateAggregateDevice,
+    kAudioPlugInDestroyAggregateDevice,
 };
 use goxlr_usb::{PID_GOXLR_FULL, PID_GOXLR_MINI, VID_GOXLR};
 use io_kit_sys::types::io_iterator_t;
@@ -119,6 +120,37 @@ pub fn get_uid_for_id(id: AudioObjectID) -> anyhow::Result<String> {
     };
 
     Ok(uid.to_string())
+}
+
+// IOAudioEngine is gone on Tahoe, so we use CoreAudio's 'lnam' property to get device names
+fn get_name_for_id(id: AudioObjectID) -> anyhow::Result<String> {
+    let properties = AudioObjectPropertyAddress {
+        mSelector: kAudioObjectPropertyName,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMaster,
+    };
+
+    let name: CFStringRef = null();
+    let size = mem::size_of::<CFStringRef>();
+
+    let name = unsafe {
+        let status = AudioObjectGetPropertyData(
+            id,
+            &properties,
+            0,
+            null(),
+            &size as *const _ as *mut _,
+            &name as *const _ as *mut _,
+        );
+
+        if status != kAudioHardwareNoError as i32 {
+            bail!("Error Getting Name for Device {}", id);
+        }
+
+        CFString::wrap_under_get_rule(name)
+    };
+
+    Ok(name.to_string())
 }
 
 pub fn create_aggregate_device(channel: String, device: &CoreAudioDevice) -> Result<AudioDeviceID> {
@@ -355,15 +387,17 @@ pub fn find_all_existing_aggregates() -> Result<Vec<AudioDeviceID>> {
 }
 
 /*
-    This function iterates over all the present CoreAudio devices, and attempts to match
-    their VID/PID to a physical GoXLR device. If found, returns the device's UID and it's
-    display name according to MacOS.
+    This function finds GoXLR devices by first verifying their VID/PID via IOKit
+    IOUSBHostDevice entries, then matching those verified names against CoreAudio
+    HAL audio devices. If found, returns the device's UID and it's display name
+    according to MacOS.
 */
 pub fn get_goxlr_devices() -> Result<Vec<CoreAudioDevice>> {
-    let mut devices: Vec<CoreAudioDevice> = Vec::new();
+    // First, find GoXLR USB device names via IOKit VID/PID matching..
+    let mut usb_names = Vec::new();
 
     let mut iterator = mem::MaybeUninit::<io_iterator_t>::uninit();
-    let matcher = unsafe { IOServiceMatching(c"IOAudioEngine".as_ptr() as *const c_char) };
+    let matcher = unsafe { IOServiceMatching(c"IOUSBHostDevice".as_ptr() as *const c_char) };
     let status = unsafe {
         IOServiceGetMatchingServices(kIOMasterPortDefault, matcher, iterator.as_mut_ptr())
     };
@@ -374,8 +408,7 @@ pub fn get_goxlr_devices() -> Result<Vec<CoreAudioDevice>> {
 
     let vid = CFString::new("idVendor");
     let pid = CFString::new("idProduct");
-    let uid = CFString::new("IOAudioEngineGlobalUniqueID");
-    let dsc = CFString::new("IOAudioEngineDescription");
+    let name = CFString::new("USB Product Name");
 
     loop {
         let service = unsafe { IOIteratorNext(iterator.assume_init()) };
@@ -411,19 +444,85 @@ pub fn get_goxlr_devices() -> Result<Vec<CoreAudioDevice>> {
             let pid = pid.to_i32().unwrap();
             // Check whether we're a GoXLR
             if pid == PID_GOXLR_FULL as i32 || pid == PID_GOXLR_MINI as i32 {
-                // Get the UID of this device..
-                if properties.contains_key(&uid) {
-                    let uid = properties.get(&uid).downcast::<CFString>().unwrap();
-
-                    if properties.contains_key(&dsc) {
-                        let description = properties.get(&dsc).downcast::<CFString>().unwrap();
-                        devices.push(CoreAudioDevice {
-                            display_name: description.to_string(),
-                            uid: uid.to_string(),
-                        });
+                // Get the USB product name of this device..
+                if let Some(name) = properties.find(&name) {
+                    if let Some(name) = name.downcast::<CFString>() {
+                        usb_names.push(name.to_string());
                     }
                 }
             }
+        }
+    }
+
+    if usb_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Now match verified USB device names against CoreAudio HAL audio devices..
+    let mut devices: Vec<CoreAudioDevice> = Vec::new();
+
+    let properties = AudioObjectPropertyAddress {
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMaster,
+    };
+
+    let size = 0u32;
+    let status = unsafe {
+        AudioObjectGetPropertyDataSize(
+            kAudioObjectSystemObject,
+            &properties,
+            0,
+            null(),
+            &size as *const _ as *mut _,
+        )
+    };
+    if status != kAudioHardwareNoError as i32 {
+        bail!("CoreAudio Error: {}", status);
+    }
+
+    let count = size as usize / mem::size_of::<AudioDeviceID>();
+    let mut device_ids: Vec<AudioDeviceID> = vec![];
+    device_ids.reserve_exact(count);
+    let status = unsafe {
+        let status = AudioObjectGetPropertyData(
+            kAudioObjectSystemObject,
+            &properties,
+            0,
+            null(),
+            &size as *const _ as *mut _,
+            device_ids.as_mut_ptr() as *mut _,
+        );
+        device_ids.set_len(count);
+        status
+    };
+
+    if status != kAudioHardwareNoError as i32 {
+        bail!("CoreAudio Error: {}", status);
+    }
+
+    for device_id in device_ids {
+        let uid = match get_uid_for_id(device_id) {
+            Ok(uid) => uid,
+            Err(_) => continue,
+        };
+
+        // Skip our own aggregate devices..
+        if uid.starts_with(AGGREGATE_PREFIX) || uid.starts_with(LEGACY_PREFIX) {
+            continue;
+        }
+
+        let name = match get_name_for_id(device_id) {
+            Ok(name) => name,
+            Err(_) => continue,
+        };
+
+        // Only accept devices whose name matches a VID/PID-verified GoXLR USB device
+        if usb_names.iter().any(|usb_name| name.contains(usb_name)) {
+            devices.push(CoreAudioDevice {
+                display_name: name,
+                uid,
+            });
         }
     }
 
